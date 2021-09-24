@@ -1,0 +1,118 @@
+#include "FEHLCD.h"
+#include "FEHRandom.h"
+#include <string.h>
+#include <vector>
+#include <math.h>
+#include <fstream>
+using namespace std;
+
+// Initialize a couple miscellaneous variables
+ofstream statsfile;
+int TARGET_SCORE = 5;
+
+// A PowerUp which persists for a little while
+struct StatusEffect {
+    int timeLeft = 0;
+    bool applied = false;
+};
+StatusEffect invincibility;
+StatusEffect slowEnemy;
+StatusEffect *allEffects[] = {&invincibility, &slowEnemy};
+
+// A set of data for a particular game
+class Stat {
+    public:
+        void Write();
+        int score = 0;
+        int life = 10;
+        float time = 240;
+        int diff = -1;
+        char name[30] = "hai";
+        char str[42];
+    private:
+};
+// A vector containing the top 5 Stats
+vector<Stat> topStats = {*(new Stat), *(new Stat), *(new Stat), *(new Stat), *(new Stat)};
+
+// The Stat of the current game
+Stat currStat;
+
+// Save statistics to a file
+void SaveStats() {
+    statsfile.open("stats.txt", fstream::app);
+    statsfile << currStat.score << endl;
+    statsfile << currStat.life << endl;
+    statsfile << currStat.time << endl;
+    statsfile << currStat.diff << endl;
+    statsfile.close();
+}
+
+// Load the stats from a file and sort them
+void LoadStats() {
+    // Open the file
+    FILE *file;
+    file = fopen("stats.txt", "r");
+
+    // Reset the top stats
+    topStats = {*(new Stat), *(new Stat), *(new Stat), *(new Stat), *(new Stat)};
+
+    while (!feof(file)) {
+        // Load the next set of data
+        Stat newStat;
+        fscanf(file, "%i", &(newStat.score));
+        fscanf(file, "%i", &(newStat.life));
+        fscanf(file, "%f", &(newStat.time));
+        fscanf(file, "%i", &(newStat.diff));
+        
+        // Break if that finished the file
+        if (feof(file)) {
+            break;
+        }
+
+        // Save the old version of topStats
+        vector<Stat> oldTopStats = topStats;
+
+        // Sort the most recent Stats into topStats
+        for (int i = 0; i < 5; i++) {
+            if (newStat.life <= 0) continue;
+            if (topStats[i].diff == -1) {
+                topStats[i] = newStat;
+                i = 42;
+                continue;
+            }
+            if (topStats[i].time < newStat.time) {
+                for (int j = i + 1; j < 5; j++) {
+                    if (oldTopStats[j - 1].diff != -1) {
+                        topStats[j] = oldTopStats[j - 1];
+                    }
+                }
+                topStats[i] = newStat;
+                i = 42;
+                continue;
+            }
+        }
+    }
+
+    // Close the file
+    fclose(file);
+}
+
+// Initialize booleans
+bool win = false;
+bool lose= false;
+
+// Check if the game is over
+bool gameOver() {
+    // Player loses is time run out or lives run out
+    if (currStat.time == 0 || currStat.life == 0) {
+        lose = true;
+        return true;
+    }
+    // Player wins if they reach the target score
+    else if (currStat.score == TARGET_SCORE) {
+        win = true;
+        return true;
+    }
+
+    return false;
+}

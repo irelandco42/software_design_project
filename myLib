@@ -1,0 +1,859 @@
+#include "FEHLCD.h"
+#include "FEHRandom.h"
+#include "StatsAndStatus"
+#include <string.h>
+#include <vector>
+#include <math.h>
+#include <fstream>
+#include <thread>
+using namespace std;
+
+// Set a few miscellaneous varibales
+bool quitting = false;
+bool playing = false;
+
+// Anything that can be drawn on the screen is an Element
+class Element {
+    public:
+        virtual void Draw() = 0;
+
+        // Every element has an x and y coordinate,
+        // last x and y, and a dormancy boolean
+        int x, y;
+        int lastX = 0, lastY = 0;
+        bool dormant = false;
+    private:
+};
+
+// A type of Element that only displays text
+class TextBox : public Element {
+    public:
+        TextBox(char _text[50], int _x, int _y) {
+            x = _x;
+            y = _y;
+            strcpy(text, _text);
+        }
+
+        // Draw the text box
+        void Draw() {
+            LCD.WriteAt(text, x, y);
+        }
+
+        // Change the text box's text
+        void changeText(char _text[50]) {
+            strcpy(text, _text);
+        }
+    private:
+        char text[50];
+};
+
+// A special type of TextBox which displays a number
+class NumberTextBox : public TextBox {
+    public:
+        NumberTextBox(int _num, int _x, int _y) : TextBox("Overriden", _x, _y){
+            x = _x;
+            y = _y;
+            num = _num;
+        }
+
+        // Draw the text box
+        void Draw() {
+            LCD.WriteAt(num, x, y);
+        }
+    private:
+        int num;
+};
+
+// A type of Element that has text and can be pressed
+class Button : public Element {
+    public:
+        Button(int, int, int, int, char _text[42]);
+
+        // Draw the Button
+        void Draw();
+
+        // Reset the Button's text
+        void setText(char[42]);
+
+        // Is the Button pressed?
+        bool Pressed(int, int);
+
+        // Do what needs to be done when the button's pressed
+        virtual void Press() = 0;
+    private:
+        int width, height;
+        char text[42];
+};
+
+// A type of element which can be collided with and has a hitbox
+class Entity : public Element {
+    public:
+        Entity(int _x, int _y) {
+            x = _x;
+            y = _y;
+        }
+
+        // Check is the Entity has been hit by the Player
+        virtual void checkHit(int, int) = 0;
+
+        // Do what must be done when the entity's hit
+        virtual void Hit() = 0;
+
+        // Move the entity
+        virtual void Move() = 0;
+
+        // Spawn the entity in a completely random location on screen
+        void SpawnRand() {
+            x = RandInt() % 300;
+            y = RandInt() % 220;
+        }
+    private:
+};
+
+// A type of entity which is the player controlled element
+class Player : public Entity {
+    public:
+        Player(int _x, int _y) : Entity(100, 100) {};
+
+        // Set the Player's position semi-randomly
+        void SetPosition();
+
+        // Draw the Player
+        void Draw();
+
+        // Empty, the player is never hit
+        // Need to be there as an overriding function
+        void Hit() {}
+
+        // Move the player according to the current direction of movement
+        void Move() {
+            if (up) {
+                y -= PLAYER_SPEED;
+            } else if (down) {
+                y += PLAYER_SPEED;
+            } else if (right) {
+                x += PLAYER_SPEED;
+            } else if (left) {
+                x -= PLAYER_SPEED;
+            }
+        }
+
+        // Empty, the player is never hit
+        // Need to be there as an overriding function
+        void checkHit(int x, int y) {}
+
+        // Set a few booleans which need to be accessed outside the class
+        bool up = false, down = false, right = false, left = false;
+    private:
+        int PLAYER_SPEED = 10;
+};
+// Create the only instance of Player
+Player Player1(100, 100);
+
+// An Entity which chases the player around
+class Enemy : public Entity {
+    public:
+        Enemy(int _x, int _y, int _SPEED) : Entity(_x, _y) {SPEED = _SPEED;};
+
+        // Semi-randomly intialize the Enemy's starting position
+        void SetPosition();
+
+        // Draw the Enemy
+        void Draw();
+
+        // Subtract one from the player's lives and respawn randomly
+        void Hit() {
+            LCD.SetDrawColor(LCD.Black);
+            LCD.FillRectangle(52, 15, 20, 15);
+            if (!invincibility.applied) {
+                currStat.life--;
+            }
+            SpawnRand();
+        }
+
+        // Set the speed
+        void setSpeed(int newSpeed) {
+            SPEED = newSpeed;
+        }
+
+        // Move the enemy
+        void Move();
+
+        // Check if the Player has hit the enemy
+        void checkHit(int x, int y);
+    private:
+        // Set new locations
+        void setNew(int newX, int newY) {
+            x = newX;
+            y = newY;
+        }
+        int SPEED;
+};
+// Initialize the three enemies which chase the player
+Enemy Enemy1(100, 100, 9);
+Enemy Enemy2(100, 100, 8);
+Enemy Enemy3(100, 100, 6);
+
+// A type of Entity which the player collides with to score
+class Scoring : public Entity {
+    public:
+        Scoring(int _x, int _y) : Entity(_x, _y) {};
+        // Semi-randomly intiialize the starting position of the scoring object
+        void SetPosition();
+
+        // Draw the scoring object
+        void Draw();
+
+        // The scoring object doesn't move
+        void Move() {}
+
+        // Add one to the player's score and respawn in a random spot
+        void Hit() {
+            LCD.SetDrawColor(LCD.Black);
+            LCD.FillRectangle(52, 0, 10, 15);
+            currStat.score++;
+            LCD.SetDrawColor(LCD.Black);
+            LCD.FillRectangle(x, y, 8, 8);
+            SpawnRand();
+        }
+
+        // Check if the scoring object's been hit
+        void checkHit(int, int);
+    private:
+};
+//Initialize the only scoring object
+Scoring Scoring1(100, 100);
+
+// Basically just a set of Elements which are all displayed at once
+class Screen {
+    public:
+        // Draw the Screen
+        void Draw();
+
+        // Add a Button to the Screen
+        void addButton(Button*);
+
+        // Add a TextBox to the Screen
+        void addTextBox(TextBox*);
+
+        // Add an Entity to the Screen
+        void addEntity(Entity*);
+
+        // Check if any of the Screen's Buttons have been pressed
+        void checkPressed(int, int);
+
+        // Move all the Entities on the Screen
+        void moveEntities();
+
+        // Check if any Entities have been hit by the player
+        void CheckHits();
+
+        // Get rid of all Screen's TextBoxes
+        void EraseTextBoxes() {
+            numText = 0;
+            textPtrs.clear();
+        }
+    private:
+        // Vectors containing all the Screen's Elements, Buttons,
+        // TextBoxes, and Entities
+        vector<Element*> elementPtrs = {};
+        vector<Button*> buttonPtrs = {};
+        vector<TextBox*> textPtrs = {};
+        vector<Entity*> entityPtrs = {};
+
+        // Integers keeping track of how many each type of Element the Screen has
+        int numElements = 0;
+        int numButtons = 0;
+        int numText = 0;
+        int numEntities = 0;
+};
+// Initialize all the screens
+Screen currScreen;
+Screen mainMenu;
+Screen instructions;
+Screen statsScreen;
+Screen credits;
+Screen gameScreen;
+Screen endScreen;
+
+// Initialize everything necessary at the start of the actual game
+void StartGame() {
+    // Call the methods which semi-randomly set the positions of
+    // most of the Entities
+    Player1.SetPosition();
+    Enemy1.SetPosition();
+    Enemy2.SetPosition();
+    Enemy3.SetPosition();
+    Scoring1.SetPosition();
+
+    // Add these Entities to the gameScreen
+    gameScreen.addEntity(&Player1);
+    gameScreen.addEntity(&Enemy1);
+    gameScreen.addEntity(&Enemy2);
+    gameScreen.addEntity(&Enemy3);
+    gameScreen.addEntity(&Scoring1);
+
+    // Set the speeds of the Enemies based on the difficulty level
+    switch (currStat.diff) {
+        case 1:
+            Enemy1.setSpeed(6);
+            Enemy2.setSpeed(5);
+            Enemy3.setSpeed(4);
+            break;
+        case 2:
+            Enemy1.setSpeed(8);
+            Enemy2.setSpeed(6);
+            Enemy3.setSpeed(5);
+            break;
+        case 3:
+            Enemy1.setSpeed(10);
+            Enemy2.setSpeed(8);
+            Enemy3.setSpeed(6);
+            break;
+    }
+
+    // Add the TextBoxes of the scoreboard
+    gameScreen.addTextBox(new TextBox("Score: ", 0, 0));
+    gameScreen.addTextBox(new TextBox("Life: ", 0, 15));
+    gameScreen.addTextBox(new TextBox("Time: ", 0, 30));
+}
+
+// Display the top scores on the statsScreen
+void StatsOnScreen() {
+    // Reset the statsScreen
+    statsScreen.EraseTextBoxes();
+
+    // Add the headers
+    statsScreen.addTextBox(new TextBox("Top 5 Wins By Time", 0, 0));
+    statsScreen.addTextBox(new TextBox("Time Left", 0, 20));
+    statsScreen.addTextBox(new TextBox("Difficulty", 95, 20));
+    statsScreen.addTextBox(new TextBox("Lives Left", 185, 20));
+
+    // Display the top scores
+    for (int i = 0; i < 5; i++) {
+        if (topStats[i].diff != -1 && topStats[i].life > 0) {
+            statsScreen.addTextBox(new NumberTextBox(topStats[i].time, 0, 45 + (20 * i)));
+            statsScreen.addTextBox(new NumberTextBox(topStats[i].diff, 95, 45 + (20 * i)));
+            statsScreen.addTextBox(new NumberTextBox(topStats[i].life, 185, 45 + (20 * i)));
+        }
+    }
+}
+
+// A type of Entity which gives the player special advantages
+// (It's way down here because the types of PowerUps are here too)
+class PowerUp : public Entity {
+    public:
+        PowerUp(int _x, int _y, FEHLCD::FEHLCDColor _color) : Entity(_x, _y) {
+            dormant = true;
+            color = _color;
+        };
+        // PowerUps don't move
+        void Move() {}
+
+        // Draw the PowerUp
+        void Draw() {
+            if (!dormant) {
+                LCD.SetDrawColor(color);
+                LCD.FillRectangle(x, y, 8, 8);
+            }
+        }
+
+        // Check if the PowerUp has been hit by the Player
+        void checkHit(int _x, int _y);
+
+        // Disable the PowerUp
+        void despawn() {
+            LCD.SetDrawColor(LCD.Black);
+            LCD.FillRectangle(x, y, 8, 8);
+            dormant = true;
+        }
+
+        // Respawn the PowerUp
+        void spawn();
+    private:
+        FEHLCD::FEHLCDColor color;
+};
+
+// A type of PowerUp which makes the Player invincible for a short time
+class InvincibilityPU : public PowerUp {
+    public:
+        InvincibilityPU(int _x, int _y) : PowerUp(_x, _y, LCD.Gray) {};
+
+        // Make the player invincible for 20 ticks
+        void Hit() {
+            invincibility.applied = true;
+            invincibility.timeLeft = 20;
+            despawn();
+        }
+};
+InvincibilityPU invisiblePU(42, 42);
+
+// A type of PowerUp which slows the enemies for a short time
+class slowEnemyPU : public PowerUp {
+    public:
+        slowEnemyPU(int _x, int _y) : PowerUp(_x, _y, LCD.Green) {};
+
+        // Slow down the enemies for 20 ticks
+        void Hit() {
+            slowEnemy.applied = true;
+            slowEnemy.timeLeft = 20;
+            despawn();
+        }
+};
+slowEnemyPU slowPU(42, 42);
+
+// A type of PowerUp which adds more time to the clock
+class moreTimePU : public PowerUp {
+    public:
+        moreTimePU(int _x, int _y) : PowerUp(_x, _y, LCD.Blue) {};
+
+        // Add 15 ticks to the time left
+        void Hit() {
+            currStat.time += 10;
+            despawn();
+        }
+};
+moreTimePU timePU(42, 42);
+
+// A type of PowerUp which gives the Player more lives
+class moreLifePU : public PowerUp {
+    public:
+        moreLifePU(int _x, int _y) : PowerUp(_x, _y, LCD.Red) {};
+
+        // Give the Player another life
+        void Hit() {
+            LCD.SetDrawColor(LCD.Black);
+            LCD.FillRectangle(52, 15, 20, 15);
+            currStat.life += 1;
+            despawn();
+        }
+};
+moreLifePU lifePU(42, 42);
+
+// A Button which sets the difficulty to easy
+class EasyButton : public Button {
+    public:
+        EasyButton() : Button(100, 20, 42, 17, "EASY") {dormant = true;};
+
+        // Set the difficulty to easy and start the game
+        void Press() {
+            LCD.Clear();
+            currStat.diff = 1;
+            playing = true;
+            StartGame();
+            currScreen = gameScreen;
+        };
+    private:
+};
+EasyButton easy;
+
+// A Button which sets the difficulty to medium
+class MedButton : public Button {
+    public:
+        MedButton() : Button(100, 40, 69, 17, "MEDIUM") {dormant = true;};
+
+        // Set the difficulty to medium and start the game
+        void Press() {
+            LCD.Clear();
+            currStat.diff = 2;
+            playing = true;
+            StartGame();
+            currScreen = gameScreen;
+        };
+    private:
+};
+MedButton med;
+
+// A Button which sets the difficulty to hard
+class HardButton : public Button {
+    public:
+        HardButton() : Button(100, 60, 49, 17, "HARD") {dormant = true;};
+
+        // Set the difficulty to hard and start the game
+        void Press() {
+            LCD.Clear();
+            currStat.diff = 3;
+            playing = true;
+            StartGame();
+            currScreen = gameScreen;
+        };
+    private:
+};
+HardButton hard;
+
+// A Button which pulls up the instructions
+class InstructionsButton : public Button {
+    public:
+        InstructionsButton() : Button(0, 0, 92, 20, "Instructions") {};
+        void Press() {
+            currScreen = instructions;
+        };
+    private:
+};
+
+// A Button which activates the difficulty selection
+class StartGameButton : public Button {
+    public:
+        StartGameButton() : Button(0, 20, 88, 20, "Start Game") {};
+        void Press() {
+            currStat = *(new Stat);
+            easy.dormant = false;
+            med.dormant = false;
+            hard.dormant = false;
+        };
+    private:
+};
+
+// A Button which pulls up the statsScreen
+class ViewStats : public Button {
+    public:
+        ViewStats() : Button(0, 40, 80, 20, "View Stats") {};
+        void Press() {
+            LoadStats();
+            StatsOnScreen();
+            currScreen = statsScreen;
+        };
+    private:
+
+};
+
+// A Button which quits the program
+class Quit : public Button {
+    public:
+        Quit() : Button(0, 80, 40, 20, "Quit") {};
+        void Press() {
+            quitting = true;
+        }
+    private:
+};
+
+// A Button which pulls up the credits
+class CreditsButton : public Button {
+    public:
+        CreditsButton() : Button(0, 60, 55, 20, "Credits") {};
+        void Press() {
+            currScreen = credits;
+        }
+    private:
+};
+
+// A Button which pulls up the main menu
+class MainMenuButton : public Button {
+    public:
+        MainMenuButton() : Button(235, 220, 88, 20, "Main Menu") {};
+        void Press() {
+            playing = false;
+            currScreen = mainMenu;
+        }
+    private:
+};
+ 
+// Put up button on screen
+class UpButton : public Button {
+    public: 
+        UpButton () : Button (284, 206, 15, 15, " ^") {};
+        // Detect if up button is pressed
+        void Press () {
+            // Move player according to up button
+            Player1.up = true;
+            Player1.down = false;
+            Player1.right = false;
+            Player1.left = false;
+        };
+    private:
+        
+};
+
+// Put down button on screen
+class DownButton : public Button {
+    public: 
+        DownButton () : Button (284, 223, 15, 15, " v") {};
+        // Detect if down button is pressed
+        void Press () {
+            // Move player according to down button
+            Player1.up = false;
+            Player1.down = true;
+            Player1.right = false;
+            Player1.left = false;
+        };
+    private:
+        
+};
+ 
+// Put right button on screen
+class RightButton : public Button {
+    public: 
+        RightButton () : Button (301, 223, 15, 15, " >") {};
+        // Detect if right button is pressed
+        void Press () {
+            // Move player according to right button
+            Player1.up = false;
+            Player1.down = false;
+            Player1.right = true;
+            Player1.left = false;
+        };
+    private:
+        
+};
+ 
+// Put left button on screen
+class LeftButton : public Button {
+    public: 
+        LeftButton () : Button (267, 223, 15, 15, " <") {};
+        // Detect is left button is pressed
+        void Press () {
+            // Move player according to left button
+            Player1.up = false;
+            Player1.down = false;
+            Player1.right = false;
+            Player1.left = true;
+        };
+    private:
+        
+};
+
+
+// Button constructor which initialized the initial variables
+Button::Button(int _x, int _y, int _width, int _height, char _text[42]) {
+    x = _x;
+    y = _y;
+    width = _width;
+    height = _height;
+    strcpy(text, _text);
+}
+
+// Draw the Button if it's not dormant
+void Button::Draw() {
+    if (!dormant) {
+        LCD.SetDrawColor(LCD.Scarlet);
+        LCD.FillRectangle(x, y, width, height);
+        LCD.WriteAt(text, x, y);
+    }
+}
+
+// Re-set the Button text
+void Button::setText(char newText[42]) {
+    strcpy(text, newText);
+}
+
+// Boolean returning whether the user clicks inside the button boundaries
+bool Button::Pressed(int _x, int _y) {
+    if (_x > x && _x < x + width && _y > y && _y < y + height) {
+        Press();
+        return true;
+    } else {
+        return false;
+    }
+}
+
+// Draw all the Elements on the Screen
+void Screen::Draw() {
+    if (!playing) {
+        LCD.Clear(LCD.Black);
+    }
+    for (int i = 0; i < numElements; i++) {
+        (*elementPtrs[i]).Draw();
+    }
+}
+
+// Add a TextBox to the Screen
+void Screen::addTextBox(TextBox *newPtr) {
+    // Add the TextBox to the Elements list
+    numElements++;
+    elementPtrs.resize(numElements);
+    elementPtrs[numElements - 1] = newPtr;
+
+    numText++;
+    textPtrs.resize(numText);
+    textPtrs[numText - 1] = newPtr;
+}
+
+// Add a Button to the Screen
+void Screen::addButton(Button *newPtr) {
+    // Add the Button to the Elements list
+    numElements++;
+    elementPtrs.resize(numElements);
+    elementPtrs[numElements - 1] = newPtr;
+
+    numButtons++;
+    buttonPtrs.resize(numButtons);
+    buttonPtrs[numButtons - 1] = newPtr;
+}
+
+// Add an Entity to the Screen
+void Screen::addEntity(Entity *newPtr) {
+    // Add the Entity to the Elements list
+    numElements++;
+    elementPtrs.resize(numElements);
+    elementPtrs[numElements - 1] = newPtr;
+
+    numEntities++;
+    entityPtrs.resize(numEntities);
+    entityPtrs[numEntities - 1] = newPtr;
+}
+
+// Check if any of the buttons have been pressed
+void Screen::checkPressed(int x, int y) {
+    for (int i = 0; i < numElements; i++) {
+        if ((*buttonPtrs[i]).Pressed(x, y)) {
+            i = 42;
+        }
+    }
+}
+
+// Move all the Entities on the Screen
+void Screen::moveEntities() {
+    for (int i = 0; i < numEntities; i++) {
+        entityPtrs[i]->Move();
+    }
+}
+
+// Check if the player hit any Entities
+void Screen::CheckHits() {
+    for (int i = 0; i < numEntities; i++) {
+        entityPtrs[i]->checkHit(Player1.x, Player1.y);
+    }
+}
+
+// Semi-randomly set the Player's position
+void Player::SetPosition() {
+    int xPos = (RandInt() % 25) + 10;
+    int yPos = (RandInt() % 220) + 10;
+    x = xPos;
+    y = yPos;
+}
+ 
+// Draw the Player
+void Player::Draw() {
+    LCD.SetDrawColor(LCD.Black);
+    LCD.FillCircle(lastX, lastY, 8);
+    LCD.SetDrawColor(LCD.Blue);
+    LCD.FillCircle(x, y, 8);
+    lastX = x;
+    lastY = y;
+}
+
+// Semi-randomly set an Enemy's position
+void Enemy::SetPosition() {
+    int xPos = (RandInt() % 160) + 80;
+    int yPos = RandInt() % 220;
+    x = xPos;
+    y = yPos;
+}
+ 
+// Draw the Enemy
+void Enemy::Draw() {
+    LCD.SetDrawColor(LCD.Black);
+    LCD.FillRectangle(lastX, lastY, 20, 20);
+    LCD.SetDrawColor(LCD.Scarlet);
+    LCD.FillRectangle(x, y, 20, 20);
+    lastX = x;
+    lastY = y;
+}
+
+// Check if the Player hit the Enemy
+void Enemy::checkHit(int player_x, int player_y) {
+    // Hit if the player intersects the square
+    if (player_x >= x - 8 && player_x <= x + 28 && player_y >= y - 8 && player_y <= y + 28) {
+        if (!invincibility.applied) {
+            LCD.SetDrawColor(LCD.Red);
+            LCD.FillCircle(Player1.lastX, Player1.lastY, 8);
+        }
+        Hit();
+    }
+}
+
+// Move the Enemy
+void Enemy::Move() {
+    double mult = 1;
+
+    // Find the difference between Player and Enemy
+    double xDiff = x - (Player1.x - 10);
+    double yDiff = y - (Player1.y - 10);
+
+    // Find the angle between Player and Enemy
+    double ang = atan(yDiff / xDiff);
+    if (xDiff > 0 && yDiff > 0) {
+    } else if (xDiff < 0 && yDiff > 0) {
+        ang = ang + M_PI;
+    } else if (xDiff < 0 && yDiff < 0) {
+        ang = ang - M_PI;
+    } else {
+        ang = ang;
+    }
+    
+    // Apply the slowEnemy PowerUp if necessary
+    if (slowEnemy.applied) mult = 0.5;
+
+    // Set the new Enemy position
+    setNew(x - (cos(ang)*SPEED*mult), y - (sin(ang)*SPEED*mult));
+}
+
+// Respawn the PowerUp
+void PowerUp::spawn() {
+    LCD.SetDrawColor(LCD.Black);
+    LCD.FillRectangle(lastX, lastY, 8, 8);
+    dormant = false;
+    SpawnRand();
+    lastX = x;
+    lastY = y;
+}
+
+// Check if the PowerUp was hit by the Player
+void PowerUp::checkHit(int player_x, int player_y) {
+    if (player_x >= x - 8 && player_x <= x + 16 && player_y >= y - 8 && player_y <= y + 16) {
+        Hit();
+    }
+}
+
+// Semi-randomly set the psoition of the scoring element
+void Scoring::SetPosition() {
+    int xPos = (RandInt() % 20) + 280;
+    int yPos = RandInt() % 220;
+    x = xPos;
+    y = yPos;
+}
+ 
+ // Draw the scoring element
+void Scoring::Draw() {
+    if (!dormant) {
+        LCD.SetDrawColor(LCD.White);
+        LCD.FillRectangle(x, y, 8, 8);
+    }
+}
+ 
+// Check if the scoring element was hit by the Player
+void Scoring::checkHit(int player_x, int player_y) {
+    if (player_x >= x - 8 && player_x <= x + 16 && player_y >= y - 8 && player_y <= y + 16 && !dormant) {
+        Hit();
+    }
+}
+
+// Spawn new PowerUps every so often
+bool spwanedRecent = false;
+void spawnNewPU() {
+    // Spawn the new PowerUp only if the time is right
+    if (((int) currStat.time) % 30 <= 1 && !spwanedRecent) {
+        // Randomly pick a new PowerUp to spawn
+        int rand = RandInt() % 4;
+        switch (rand) {
+            case 0:
+                invisiblePU.spawn();
+                break;
+            case 1:
+                slowPU.spawn();
+                break;
+            case 2:
+                timePU.spawn();
+                break;
+            case 3:
+                lifePU.spawn();
+                break;
+        }
+        spwanedRecent = true;
+    } else if ((int) currStat.time % 20 <= 1) {
+
+    } else {
+        spwanedRecent = false;
+    }
+}
